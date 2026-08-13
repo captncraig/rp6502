@@ -282,6 +282,76 @@ mode3_render_4bpp(int16_t plane_id, int16_t scanline_id, int16_t width, uint16_t
     return true;
 }
 
+// Same contract as mode3_fill_cols, but wrap/clamp against a destination-space
+// bitmap width (source width_px doubled) for the 2x horizontal stretch modes.
+static inline __attribute__((always_inline)) int16_t
+mode3_fill_cols_2x(mode3_config_t *config, uint16_t **rgb, int16_t *col, int16_t *width)
+{
+    const int16_t width_px2 = config->width_px * 2;
+    if (*col < 0)
+    {
+        if (config->x_wrap)
+            *col += (-(*col + 1) / width_px2 + 1) * width_px2;
+        else
+        {
+            uint16_t empty_cols = -*col;
+            if (empty_cols > *width)
+                empty_cols = *width;
+            memset(*rgb, 0, sizeof(uint16_t) * empty_cols);
+            *rgb += empty_cols;
+            *col += empty_cols;
+            *width -= empty_cols;
+            return 0;
+        }
+    }
+    if (*col >= width_px2)
+    {
+        if (config->x_wrap)
+            *col -= ((*col - width_px2) / width_px2 + 1) * width_px2;
+        else
+        {
+            memset(*rgb, 0, sizeof(uint16_t) * (*width));
+            *width = 0;
+        }
+    }
+    int16_t fill_cols = *width;
+    if (fill_cols > width_px2 - *col)
+        fill_cols = width_px2 - *col;
+    *width -= fill_cols;
+    return fill_cols;
+}
+
+// Doubles each source pixel horizontally: width_px/height_px/xram_data_ptr
+// still describe the source bitmap at its native (unstretched) size.
+static bool
+mode3_render_4bpp_stretched(int16_t plane_id, int16_t scanline_id, int16_t width, uint16_t *rgb, uint16_t config_ptr)
+{
+    (void)plane_id;
+    mode3_config_t *config = (void *)&xram[config_ptr];
+    volatile const uint8_t *row_data = mode3_scanline_to_data(scanline_id, config, 4);
+    if (!row_data)
+        return false;
+    volatile const uint16_t *palette = mode3_get_palette(config, 4);
+    uint16_t pal[16];
+    for (int i = 0; i < 16; i++)
+        pal[i] = palette[i];
+    int16_t col = -config->x_pos_px;
+    while (width)
+    {
+        int16_t fill_cols = mode3_fill_cols_2x(config, &rgb, &col, &width);
+        while (fill_cols)
+        {
+            const int16_t src_col = col >> 1;
+            volatile const uint8_t *data = &row_data[src_col >> 1];
+            uint16_t c = pal[(src_col & 1) ? (*data & 0xF) : (*data >> 4)];
+            *rgb++ = c;
+            col++;
+            fill_cols--;
+        }
+    }
+    return true;
+}
+
 static bool
 mode3_render_4bpp_reverse(int16_t plane_id, int16_t scanline_id, int16_t width, uint16_t *rgb, uint16_t config_ptr)
 {
@@ -400,6 +470,9 @@ bool mode3_prog(uint16_t *xregs)
         break;
     case 10:
         render_fn = mode3_render_4bpp_reverse;
+        break;
+    case 18:
+        render_fn = mode3_render_4bpp_stretched;
         break;
     default:
         return false;
