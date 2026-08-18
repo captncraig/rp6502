@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
+#include "emu/emu/via.h"
 #include "emu/sys/mem.h"
 #include <stdalign.h>
 
@@ -11,6 +12,17 @@ uint8_t ram[0x10000];
 
 static uint8_t xram_mem[0x10000];
 uint8_t *const xram = xram_mem;
+
+/* $8000-$BFFF is a banked 16KB window. The bank number is VIA port B (register
+ * 0, VIA_MMAP_LO), which mem_tick already shadows into ram[] like every other
+ * write, so no via.c involvement is needed to read the current bank. Bank 0
+ * stays backed by ram[] itself (not banked_ram[0]) since the ROM loader and
+ * debug memory views write/read this range straight through ram[] before the
+ * CPU ever runs, bypassing mem_tick entirely. */
+#define BANK_LO 0x8000
+#define BANK_HI 0xBFFF
+#define BANK_COUNT 64
+static uint8_t banked_ram[BANK_COUNT - 1][BANK_HI - BANK_LO + 1];
 
 alignas(4) volatile uint8_t regs[0x20];
 
@@ -28,6 +40,19 @@ volatile uint8_t xram_queue[256][2];
  * $FF00-$FFCF reads as open bus: nothing drives it, so data keeps what the CPU left. */
 void mem_tick(uint16_t addr, bool read, uint8_t *data)
 {
+    if (addr >= BANK_LO && addr <= BANK_HI)
+    {
+        uint8_t bank = ram[VIA_MMAP_LO] & (BANK_COUNT - 1);
+        if (bank)
+        {
+            uint8_t *cell = &banked_ram[bank - 1][addr - BANK_LO];
+            if (!read)
+                *cell = *data;
+            else
+                *data = *cell;
+            return;
+        }
+    }
     if (!read)
         ram[addr] = *data;
     else if (addr <= MEM_MMAP_HI)
